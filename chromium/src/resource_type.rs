@@ -89,6 +89,33 @@ impl ChromiumResourceType {
     pub fn is_document_navigation(self, url: &str) -> bool {
         matches!(self, Self::MainFrame) && is_http_scheme(url)
     }
+
+    /// Map a DevTools `resourceType` onto Brave's Chromium types.
+    ///
+    /// `Fetch` and `EventSource` become `xhr` because Chromium classifies
+    /// `fetch()` as `kXhr`, which is what `$xmlhttprequest` matches.
+    pub fn from_devtools(resource_type: &str, is_main_frame: bool) -> Self {
+        match resource_type.to_ascii_lowercase().as_str() {
+            "document" if is_main_frame => Self::MainFrame,
+            "document" => Self::SubFrame,
+            "stylesheet" => Self::Stylesheet,
+            "script" => Self::Script,
+            "image" => Self::Image,
+            "favicon" => Self::Favicon,
+            "font" | "fontresource" => Self::Font,
+            "media" | "texttrack" => Self::Media,
+            "xhr" | "fetch" | "eventsource" => Self::Xhr,
+            "ping" => Self::Ping,
+            "prefetch" => Self::Prefetch,
+            "cspviolationreport" | "csp_report" => Self::CspReport,
+            "worker" => Self::Worker,
+            "sharedworker" | "shared_worker" => Self::SharedWorker,
+            "serviceworker" | "service_worker" => Self::ServiceWorker,
+            "object" => Self::Object,
+            "subresource" | "sub_resource" => Self::SubResource,
+            _ => Self::Other,
+        }
+    }
 }
 
 pub fn is_supported_scheme(url: &str) -> bool {
@@ -223,5 +250,25 @@ mod tests {
             !ChromiumResourceType::MainFrame.is_document_navigation("wss://news.example/socket")
         );
         assert!(!ChromiumResourceType::SubFrame.is_document_navigation("https://news.example/"));
+    }
+
+    #[test]
+    fn devtools_fetch_is_xhr_and_subframes_stay_subframes() {
+        assert_eq!(
+            ChromiumResourceType::from_devtools("Fetch", true),
+            ChromiumResourceType::Xhr
+        );
+        assert_eq!(
+            ChromiumResourceType::from_devtools("Document", true),
+            ChromiumResourceType::MainFrame
+        );
+        assert_eq!(
+            ChromiumResourceType::from_devtools("Document", false),
+            ChromiumResourceType::SubFrame
+        );
+        assert_eq!(
+            ChromiumResourceType::from_devtools("WebSocket", true),
+            ChromiumResourceType::Other
+        );
     }
 }

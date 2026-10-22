@@ -11,6 +11,8 @@
 //!
 //! The design lives in `docs/superpowers/specs/2026-10-22-chromium-brave-adblock-design.md`.
 
+pub mod browser;
+mod cdp;
 pub mod cef;
 pub mod cosmetic;
 pub mod data_url;
@@ -21,6 +23,9 @@ pub mod lists;
 pub mod request;
 pub mod resource_type;
 
+pub use browser::{
+    find_chromium_binary, BrowserError, ChromiumSession, LaunchOptions, ObservedRequest,
+};
 pub use cosmetic::CosmeticPlan;
 pub use decision::{MatchInfo, NetworkDecision};
 pub use host::{BraveAdblockHost, HostError};

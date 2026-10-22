@@ -109,6 +109,22 @@ Filter list text is not vendored. EasyList and EasyPrivacy are GPL-3.0-or-later 
 
 The CLI prints JSON. `decide` reports `allow`, `cancel`, `stub`, or `block_navigation` plus the matched rule when debug info is available. `cosmetics` prints the plan. `csp` prints the directives.
 
+## Chromium session
+
+`ChromiumSession` launches the Chromium binary (`google-chrome`, `chromium`, or `ZEN_CHROMIUM_BIN`) and attaches to its page DevTools socket. Chromium pauses every request on the Fetch domain, which is the browser-process enforcement point Brave uses: the decision is made outside the renderer, then Chromium continues, rewrites, cancels, or fulfills the response.
+
+- `Cancel` calls `Fetch.failRequest` with `BlockedByClient`.
+- `Allow` with a rewritten URL is answered with an internal 307 to that URL, which is how Brave applies `$removeparam`. The follow-up request is checked again. `$removeparam` is limited to `GET`, `HEAD`, and `OPTIONS` by the host.
+- `Stub` calls `Fetch.fulfillRequest` with the redirect body and never opens a socket.
+- `BlockNavigation` fulfills an HTML interstitial and does not request the blocked document.
+- Document responses get an extra `Content-Security-Policy` header when `content_security_policy` returns directives. Multiple CSP headers are enforced together.
+- Specific cosmetic CSS and `injected_script` are inserted immediately after `<head>` before the document is parsed, so scriptlets run in the page ahead of its own scripts.
+- After `load`, class and id tokens are collected and generic cosmetic rules are inserted. Procedural actions are still returned to the caller and are not interpreted.
+
+`zen-chromium browse URL` performs that navigation. It is headless unless `--headed` is set. `DevTools` `Fetch` and `XHR` both map to adblock `xhr`.
+
+The Firefox chrome is still the UI for `npm run build`. This session is the Chromium port's browser: web content runs in Chromium, and every network decision goes through Brave's engine.
+
 ## Build
 
 ```bash
@@ -137,10 +153,11 @@ Do not modify these trees for this port:
 
 `chromium/tests/brave_vectors.rs` covers third-party blocking, first-party `$third-party`, `@@` exceptions, `$important`, `$redirect`, `$redirect-rule`, `$csp`, `$removeparam` including the method gate, cosmetic hides, generic class selectors, `#@#` exceptions, `$generichide`, scriptlet injection, resource permissions, favicon-as-image, workers, websockets, unsupported schemes, main-frame versus subresource blocks, CNAME uncloaking, regex rules, DAT round-trip, and the CEF mapping. The CLI test drives the `zen-chromium` binary against a local list file.
 
+`chromium/tests/chromium_session.rs` launches Chromium against a local site and checks the live browser: a third-party-style ad script is cancelled before it reaches the server, the page script still runs, `$removeparam` changes the document URL, specific and generic cosmetic rules hide elements, a scriptlet runs in the page, a CSP directive blocks inline and external scripts, a `$redirect` stub is executed in place of the network body, and a blocked navigation shows the interstitial without requesting the document.
+
 ## Later, not in this change
 
-- A CEF or Chromium window that hosts web content and calls `cef`.
-- In-page execution of procedural filters and scriptlets.
-- CNAME lookup itself (the host only consumes a hostname Chromium already resolved).
+- CNAME lookup itself (the session consumes a hostname Chromium already resolved; `decide_with_canonical_host` is covered by the engine tests).
+- Procedural cosmetic operators such as `:xpath` and `:remove`. The session returns them and does not run an in-page interpreter.
 - Shields standard-mode first-party exceptions, regional list catalogs, and the component updater.
-- Replacing `surfer.json`'s Firefox engine.
+- Replacing `surfer.json`'s Firefox engine. The Zen window remains the Firefox chrome.

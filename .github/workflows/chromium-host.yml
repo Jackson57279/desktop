@@ -39,8 +39,17 @@ jobs:
         with:
           workspaces: chromium
 
+      - name: Install Chrome
+        id: chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+          install-dependencies: true
+
       - name: Test
         run: cargo test --manifest-path chromium/Cargo.toml --locked --all-targets
+        env:
+          ZEN_CHROMIUM_BIN: ${{ steps.chrome.outputs.chrome-path }}
 
       - name: Clippy
         run: cargo clippy --manifest-path chromium/Cargo.toml --locked --all-targets -- -D warnings

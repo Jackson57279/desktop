@@ -15,7 +15,7 @@ use serde::Serialize;
 use zen_chromium::filter_resources::Resource;
 use zen_chromium::{
     read_filter_list, BraveAdblockHost, ChromiumResourceRequest, ChromiumResourceType,
-    NetworkDecision, MAX_FILTER_LIST_BYTES,
+    ChromiumSession, LaunchOptions, NetworkDecision, MAX_FILTER_LIST_BYTES,
 };
 
 const USER_AGENT: &str = "ZenChromium/1.0";
@@ -80,6 +80,15 @@ enum Command {
         #[arg(long, default_value = "GET")]
         method: String,
     },
+    /// Open a URL in Chromium with the adblock engine on every request.
+    Browse {
+        url: String,
+        /// Show a window. The default is headless Chromium.
+        #[arg(long)]
+        headed: bool,
+        #[arg(long)]
+        binary: Option<PathBuf>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -122,8 +131,46 @@ fn run() -> Result<(), CliError> {
             let directives = host.content_security_policy(&request);
             print_json(&CspReport { directives })?;
         }
+        Command::Browse {
+            url,
+            headed,
+            binary,
+        } => {
+            let mut options = if headed {
+                LaunchOptions::headed()
+            } else {
+                LaunchOptions::headless()
+            };
+            if let Some(binary) = binary {
+                options = options.binary(binary);
+            }
+            let mut session = ChromiumSession::launch(host, options)
+                .map_err(|error| CliError::Message(error.to_string()))?;
+            session
+                .navigate(&url)
+                .map_err(|error| CliError::Message(error.to_string()))?;
+            let final_url = session
+                .evaluate("location.href")
+                .map_err(|error| CliError::Message(error.to_string()))?;
+            let final_url = final_url.as_str().unwrap_or(&url).to_string();
+            print_json(&BrowseReport {
+                url: final_url,
+                observed: session.observed().to_vec(),
+            })?;
+            if headed {
+                session
+                    .run_until_exit()
+                    .map_err(|error| CliError::Message(error.to_string()))?;
+            }
+        }
     }
     Ok(())
+}
+
+#[derive(Serialize)]
+struct BrowseReport {
+    url: String,
+    observed: Vec<zen_chromium::ObservedRequest>,
 }
 
 #[derive(Serialize)]
