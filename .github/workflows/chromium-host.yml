@@ -39,17 +39,14 @@ jobs:
         with:
           workspaces: chromium
 
-      - name: Install Chrome
-        id: chrome
-        uses: browser-actions/setup-chrome@v1
+      - name: Cache Chromium engine
+        uses: actions/cache@v5
         with:
-          chrome-version: stable
-          install-dependencies: true
+          path: ~/.cache/zen-chromium
+          key: chromium-linux-x64-1725037
 
       - name: Test
         run: cargo test --manifest-path chromium/Cargo.toml --locked --all-targets
-        env:
-          ZEN_CHROMIUM_BIN: ${{ steps.chrome.outputs.chrome-path }}
 
       - name: Clippy
         run: cargo clippy --manifest-path chromium/Cargo.toml --locked --all-targets -- -D warnings

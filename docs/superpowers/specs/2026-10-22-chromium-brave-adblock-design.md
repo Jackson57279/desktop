@@ -111,7 +111,7 @@ The CLI prints JSON. `decide` reports `allow`, `cancel`, `stub`, or `block_navig
 
 ## Chromium session
 
-`ChromiumSession` launches the Chromium binary (`google-chrome`, `chromium`, or `ZEN_CHROMIUM_BIN`) and attaches to its page DevTools socket. Chromium pauses every request on the Fetch domain, which is the browser-process enforcement point Brave uses: the decision is made outside the renderer, then Chromium continues, rewrites, cancels, or fulfills the response.
+`ChromiumSession` launches the Chromium engine and attaches to its page DevTools socket. The executable must report a product line that starts with `Chromium `; Google Chrome is refused. A `chromium` binary already on `PATH`, or `ZEN_CHROMIUM_BIN` when that variable points at Chromium, is used as-is. Otherwise Linux x86-64 downloads the official snapshot revision `1725037` into the user cache. Chromium pauses every request on the Fetch domain, which is the browser-process enforcement point Brave uses: the decision is made outside the renderer, then Chromium continues, rewrites, cancels, or fulfills the response.
 
 - `Cancel` calls `Fetch.failRequest` with `BlockedByClient`.
 - `Allow` with a rewritten URL is answered with an internal 307 to that URL, which is how Brave applies `$removeparam`. The follow-up request is checked again. `$removeparam` is limited to `GET`, `HEAD`, and `OPTIONS` by the host.

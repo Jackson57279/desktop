@@ -17,6 +17,7 @@ pub mod cef;
 pub mod cosmetic;
 pub mod data_url;
 pub mod decision;
+mod engine;
 pub mod filter_resources;
 pub mod host;
 pub mod lists;
@@ -28,6 +29,7 @@ pub use browser::{
 };
 pub use cosmetic::CosmeticPlan;
 pub use decision::{MatchInfo, NetworkDecision};
+pub use engine::CHROMIUM_SNAPSHOT_REVISION;
 pub use host::{BraveAdblockHost, HostError};
 pub use lists::{read_filter_list, read_filter_lists, ListError, MAX_FILTER_LIST_BYTES};
 pub use request::ChromiumResourceRequest;

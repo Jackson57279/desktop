@@ -46,7 +46,7 @@ cargo test --manifest-path chromium/Cargo.toml --all-targets
 cargo build --release --manifest-path chromium/Cargo.toml
 ```
 
-Filter list locations come from `--list` or `ZEN_CHROMIUM_FILTER_LISTS`. See `chromium/.env.example`. `zen-chromium browse URL` opens that URL in Chromium and enforces the engine on every request.
+Filter list locations come from `--list` or `ZEN_CHROMIUM_FILTER_LISTS`. See `chromium/.env.example`. `zen-chromium browse URL` opens that URL in the Chromium engine and enforces ad blocking on every request. Google Chrome is not used.
 
 ### Contributing
 

@@ -190,6 +190,11 @@ fn chromium_enforces_blocks_cosmetics_csp_stubs_and_rewrites() {
     let site = Site::spawn();
     let mut session = ChromiumSession::launch(host(), LaunchOptions::headless())
         .unwrap_or_else(|error| panic!("failed to launch Chromium: {error}"));
+    assert!(
+        session.engine_version().starts_with("Chromium "),
+        "engine is not Chromium: {}",
+        session.engine_version()
+    );
 
     session
         .navigate(&format!("{}/?utm_source=bad&id=7", site.base))

@@ -23,6 +23,7 @@ use crate::cdp::{Cdp, Incoming};
 use crate::cef::{
     on_before_resource_load, on_dom_tokens, on_headers_received, on_load_end, CefBeforeLoad,
 };
+use crate::engine::{configure_process, ensure_chromium_engine};
 use crate::host::BraveAdblockHost;
 use crate::request::ChromiumResourceRequest;
 use crate::resource_type::{is_supported_scheme, ChromiumResourceType};
@@ -104,14 +105,14 @@ pub struct ChromiumSession {
     host: BraveAdblockHost,
     main_frame_id: String,
     observed: Vec<ObservedRequest>,
+    version: String,
 }
 
 impl ChromiumSession {
     pub fn launch(host: BraveAdblockHost, options: LaunchOptions) -> Result<Self, BrowserError> {
-        let binary = match options.binary {
-            Some(path) => resolve_binary(&path)?,
-            None => find_chromium_binary()?,
-        };
+        let engine = ensure_chromium_engine(options.binary.as_deref())
+            .map_err(|error| BrowserError::Launch(error.to_string()))?;
+        let binary = engine.binary;
         let user_data = std::env::temp_dir().join(format!(
             "zen-chromium-{}-{}",
             std::process::id(),
@@ -124,6 +125,7 @@ impl ChromiumSession {
         let stderr_path = user_data.join("stderr.log");
         let stderr = fs::File::create(&stderr_path)?;
         let mut command = Command::new(&binary);
+        configure_process(&mut command, &binary);
         command
             .arg("--remote-debugging-port=0")
             .arg("--remote-allow-origins=*")
@@ -207,7 +209,12 @@ impl ChromiumSession {
             host,
             main_frame_id,
             observed: Vec::new(),
+            version: engine.version,
         })
+    }
+
+    pub fn engine_version(&self) -> &str {
+        &self.version
     }
 
     pub fn navigate(&mut self, url: &str) -> Result<(), BrowserError> {
@@ -577,45 +584,9 @@ impl Drop for ChromiumSession {
 }
 
 pub fn find_chromium_binary() -> Result<PathBuf, BrowserError> {
-    if let Some(explicit) = std::env::var_os("ZEN_CHROMIUM_BIN") {
-        return resolve_binary(Path::new(&explicit));
-    }
-    for name in [
-        "google-chrome",
-        "google-chrome-stable",
-        "chromium",
-        "chromium-browser",
-        "chrome",
-    ] {
-        if let Some(path) = search_path(name) {
-            return Ok(path);
-        }
-    }
-    Err(BrowserError::Launch(
-        "Chromium was not found. Set ZEN_CHROMIUM_BIN to the browser executable.".to_string(),
-    ))
-}
-
-fn resolve_binary(path: &Path) -> Result<PathBuf, BrowserError> {
-    if path.is_file() {
-        return Ok(path.to_path_buf());
-    }
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .and_then(search_path)
-        .ok_or_else(|| {
-            BrowserError::Launch(format!(
-                "Chromium executable {} was not found",
-                path.display()
-            ))
-        })
-}
-
-fn search_path(name: &str) -> Option<PathBuf> {
-    let paths = std::env::var_os("PATH")?;
-    std::env::split_paths(&paths)
-        .map(|dir| dir.join(name))
-        .find(|candidate| candidate.is_file())
+    ensure_chromium_engine(None)
+        .map(|engine| engine.binary)
+        .map_err(|error| BrowserError::Launch(error.to_string()))
 }
 
 fn wait_for_port(user_data: &Path, stderr_path: &Path) -> Result<u16, BrowserError> {
