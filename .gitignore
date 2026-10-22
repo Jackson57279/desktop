@@ -35,3 +35,5 @@ build/signing/private_key.pem
 build/signing/private_key.p12
 
 bloat-dump.log
+
+chromium/.env
