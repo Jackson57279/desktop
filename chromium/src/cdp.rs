@@ -20,9 +20,19 @@ pub struct Cdp {
 }
 
 pub enum Incoming {
-    Result { id: i64, result: Value },
-    Failure { id: i64, message: String },
-    Event { method: String, params: Value },
+    Result {
+        id: i64,
+        result: Value,
+    },
+    Failure {
+        id: i64,
+        message: String,
+    },
+    Event {
+        method: String,
+        params: Value,
+        session_id: Option<String>,
+    },
 }
 
 impl Cdp {
@@ -38,7 +48,16 @@ impl Cdp {
     }
 
     pub fn call(&mut self, method: &str, params: Value) -> Result<Value, BrowserError> {
-        let id = self.send(method, params)?;
+        self.call_in(method, params, None)
+    }
+
+    pub fn call_in(
+        &mut self,
+        method: &str,
+        params: Value,
+        session_id: Option<&str>,
+    ) -> Result<Value, BrowserError> {
+        let id = self.send(method, params, session_id)?;
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             if Instant::now() >= deadline {
@@ -75,14 +94,22 @@ impl Cdp {
         }
     }
 
-    pub(crate) fn send(&mut self, method: &str, params: Value) -> Result<i64, BrowserError> {
+    pub(crate) fn send(
+        &mut self,
+        method: &str,
+        params: Value,
+        session_id: Option<&str>,
+    ) -> Result<i64, BrowserError> {
         self.next_id += 1;
         let id = self.next_id;
-        let payload = json!({
+        let mut payload = json!({
             "id": id,
             "method": method,
             "params": params,
         });
+        if let Some(session_id) = session_id {
+            payload["sessionId"] = json!(session_id);
+        }
         self.socket
             .send(Message::Text(payload.to_string().into()))
             .map_err(|error| BrowserError::Cdp(format!("devtools write failed: {error}")))?;
@@ -124,6 +151,10 @@ fn parse_message(text: &str) -> Result<Incoming, BrowserError> {
         return Ok(Incoming::Event {
             method: method.to_string(),
             params: value.get("params").cloned().unwrap_or_else(|| json!({})),
+            session_id: value
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .map(str::to_string),
         });
     }
     let id = value.get("id").and_then(Value::as_i64).ok_or_else(|| {

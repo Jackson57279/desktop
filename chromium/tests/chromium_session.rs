@@ -177,6 +177,11 @@ fn host() -> BraveAdblockHost {
     )
 }
 
+fn zen_state(origin: &str) -> serde_json::Value {
+    let response = ureq::get(&format!("{origin}/api/state")).call().unwrap();
+    serde_json::from_str(&response.into_string().unwrap()).unwrap()
+}
+
 fn context(session: &ChromiumSession, site: &Site) -> String {
     format!(
         "observed: {:?}\nhits: {:?}",
@@ -195,6 +200,35 @@ fn chromium_enforces_blocks_cosmetics_csp_stubs_and_rewrites() {
         "engine is not Chromium: {}",
         session.engine_version()
     );
+    let origin = session.zen_origin().to_string();
+    let mut sidebar = String::new();
+    for _ in 0..25 {
+        sidebar = session.sidebar_text().unwrap_or_default();
+        if sidebar.contains("New Tab") && sidebar.contains("Space") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        sidebar.contains("New Tab") && sidebar.contains("Space"),
+        "sidebar did not render Zen chrome: {sidebar}"
+    );
+    ureq::post(&format!("{origin}/api/new-space"))
+        .set("content-type", "application/json")
+        .send_string(r#"{"name":"Work"}"#)
+        .unwrap();
+    ureq::post(&format!("{origin}/api/compact"))
+        .set("content-type", "application/json")
+        .send_string("{}")
+        .unwrap();
+    let chrome_state = zen_state(&origin);
+    assert_eq!(chrome_state["spaces"].as_array().unwrap().len(), 2);
+    assert!(chrome_state["compact"].as_bool().unwrap());
+    assert!(chrome_state["spaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|space| space["name"] == "Work"));
 
     session
         .navigate(&format!("{}/?utm_source=bad&id=7", site.base))

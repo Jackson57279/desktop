@@ -23,6 +23,7 @@ pub mod host;
 pub mod lists;
 pub mod request;
 pub mod resource_type;
+mod zen_chrome;
 
 pub use browser::{
     find_chromium_binary, BrowserError, ChromiumSession, LaunchOptions, ObservedRequest,

@@ -27,6 +27,7 @@ use crate::engine::{configure_process, ensure_chromium_engine};
 use crate::host::BraveAdblockHost;
 use crate::request::ChromiumResourceRequest;
 use crate::resource_type::{is_supported_scheme, ChromiumResourceType};
+use crate::zen_chrome::{normalize_location, ChromeCommand, ZenHub};
 
 const NAVIGATION_TIMEOUT: Duration = Duration::from_secs(20);
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(15);
@@ -106,6 +107,18 @@ pub struct ChromiumSession {
     main_frame_id: String,
     observed: Vec<ObservedRequest>,
     version: String,
+    zen: Option<ZenHub>,
+    browser_cdp: Option<Cdp>,
+    fetch_pipe: Pipe,
+    fetch_session: Option<String>,
+    extra_main_frames: std::collections::HashSet<String>,
+    sidebar_session: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pipe {
+    Content,
+    Browser,
 }
 
 impl ChromiumSession {
@@ -169,7 +182,7 @@ impl ChromiumSession {
         };
         trace(format!("devtools port {port}"));
         let session = (|| {
-            let page_socket = page_websocket(port, &stderr_path)?;
+            let (page_socket, content_target_id) = page_websocket(port, &stderr_path)?;
             let mut cdp = Cdp::connect(&page_socket)?;
             cdp.call("Page.enable", json!({}))?;
             cdp.call("Network.enable", json!({}))?;
@@ -193,9 +206,37 @@ impl ChromiumSession {
                     "Chromium did not report a main frame".to_string(),
                 ));
             }
-            Ok((cdp, main_frame_id))
+            let zen = ZenHub::start(content_target_id)?;
+            let browser_socket = browser_websocket(port, &stderr_path)?;
+            let mut browser = Cdp::connect(&browser_socket)?;
+            let created = browser.call(
+                "Target.createTarget",
+                json!({
+                    "url": format!("{}/", zen.origin()),
+                    "newWindow": true,
+                    "width": 300,
+                    "height": 840,
+                    "background": true,
+                }),
+            )?;
+            let sidebar_target_id = created["targetId"].as_str().unwrap_or("").to_string();
+            if sidebar_target_id.is_empty() {
+                return Err(BrowserError::Cdp(
+                    "Chromium did not open the Zen sidebar".to_string(),
+                ));
+            }
+            zen.set_sidebar_target(sidebar_target_id.clone());
+            let attached = browser.call(
+                "Target.attachToTarget",
+                json!({"targetId": sidebar_target_id, "flatten": true}),
+            )?;
+            let sidebar_session = attached["sessionId"].as_str().unwrap_or("").to_string();
+            if !sidebar_session.is_empty() {
+                browser.call_in("Runtime.enable", json!({}), Some(&sidebar_session))?;
+            }
+            Ok((cdp, main_frame_id, zen, browser, sidebar_session))
         })();
-        let (cdp, main_frame_id) = match session {
+        let (cdp, main_frame_id, zen, browser, sidebar_session) = match session {
             Ok(ready) => ready,
             Err(error) => {
                 shutdown(child);
@@ -210,7 +251,41 @@ impl ChromiumSession {
             main_frame_id,
             observed: Vec::new(),
             version: engine.version,
+            zen: Some(zen),
+            browser_cdp: Some(browser),
+            fetch_pipe: Pipe::Content,
+            fetch_session: None,
+            extra_main_frames: std::collections::HashSet::new(),
+            sidebar_session,
         })
+    }
+
+    pub fn zen_origin(&self) -> &str {
+        self.zen.as_ref().map(ZenHub::origin).unwrap_or("")
+    }
+
+    pub fn sync_chrome(&mut self) -> Result<(), BrowserError> {
+        self.drain_chrome_commands()
+    }
+
+    pub fn sidebar_text(&mut self) -> Result<String, BrowserError> {
+        let session = self.sidebar_session.clone();
+        if session.is_empty() {
+            return Err(BrowserError::Cdp("Zen sidebar is not attached".to_string()));
+        }
+        let browser = self
+            .browser_cdp
+            .as_mut()
+            .ok_or_else(|| BrowserError::Cdp("browser devtools is not connected".to_string()))?;
+        let result = browser.call_in(
+            "Runtime.evaluate",
+            json!({
+                "expression": "document.body ? document.body.innerText : ''",
+                "returnByValue": true,
+            }),
+            Some(&session),
+        )?;
+        Ok(result["result"]["value"].as_str().unwrap_or("").to_string())
     }
 
     pub fn engine_version(&self) -> &str {
@@ -220,7 +295,7 @@ impl ChromiumSession {
     pub fn navigate(&mut self, url: &str) -> Result<(), BrowserError> {
         self.observed.clear();
         self.drain_stale_events();
-        let navigation_id = self.cdp.send("Page.navigate", json!({"url": url}))?;
+        let navigation_id = self.cdp.send("Page.navigate", json!({"url": url}), None)?;
         let started = Instant::now();
         let mut navigated = false;
         let mut loaded = false;
@@ -231,32 +306,42 @@ impl ChromiumSession {
                     self.observed
                 )));
             }
-            match self.cdp.poll()? {
+            self.drain_chrome_commands()?;
+            match self.poll_next()? {
                 None => continue,
-                Some(Incoming::Result { id, result }) if id == navigation_id => {
+                Some((Pipe::Content, Incoming::Result { id, result })) if id == navigation_id => {
                     if let Some(error) = result.get("errorText").and_then(Value::as_str) {
                         trace(format!("navigate errorText: {error}"));
                     }
                 }
-                Some(Incoming::Failure { id, message }) if id == navigation_id => {
+                Some((Pipe::Content, Incoming::Failure { id, message })) if id == navigation_id => {
                     return Err(BrowserError::Cdp(format!(
                         "navigation to {url} failed: {message}"
                     )));
                 }
-                Some(Incoming::Event { method, params }) => {
-                    if method == "Page.frameNavigated"
+                Some((
+                    pipe,
+                    Incoming::Event {
+                        method,
+                        params,
+                        session_id,
+                    },
+                )) => {
+                    if pipe == Pipe::Content
+                        && method == "Page.frameNavigated"
                         && params["frame"]["id"].as_str() == Some(self.main_frame_id.as_str())
                         && params["frame"]["url"].as_str() != Some("about:blank")
                     {
                         navigated = true;
                     }
-                    if navigated {
-                        loaded = self.on_event(&method, &params)?;
+                    if navigated || pipe == Pipe::Browser {
+                        loaded = self.on_event(&method, &params, pipe, session_id.as_deref())?
+                            && pipe == Pipe::Content;
                     } else if method == "Fetch.requestPaused" {
-                        self.on_paused(params)?;
+                        self.on_paused(params, pipe, session_id)?;
                     }
                 }
-                Some(Incoming::Result { .. } | Incoming::Failure { .. }) => {}
+                Some((_, Incoming::Result { .. } | Incoming::Failure { .. })) => {}
             }
         }
         let final_url = self
@@ -265,6 +350,16 @@ impl ChromiumSession {
             .unwrap_or(url)
             .to_string();
         self.apply_dom_cosmetics(&final_url)?;
+        let title = self
+            .evaluate("document.title")
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_string))
+            .unwrap_or_default();
+        if let Some(zen) = &self.zen {
+            if let Some(target_id) = zen.active_target() {
+                zen.note_page(&target_id, &final_url, &title);
+            }
+        }
         Ok(())
     }
 
@@ -299,11 +394,19 @@ impl ChromiumSession {
             if self.child.try_wait()?.is_some() {
                 return Ok(());
             }
-            match self.cdp.poll()? {
-                Some(Incoming::Event { method, params }) => {
-                    let _ = self.on_event(&method, &params)?;
+            self.drain_chrome_commands()?;
+            match self.poll_next()? {
+                Some((
+                    pipe,
+                    Incoming::Event {
+                        method,
+                        params,
+                        session_id,
+                    },
+                )) => {
+                    let _ = self.on_event(&method, &params, pipe, session_id.as_deref())?;
                 }
-                Some(Incoming::Result { .. } | Incoming::Failure { .. }) | None => {}
+                Some((_, Incoming::Result { .. } | Incoming::Failure { .. })) | None => {}
             }
         }
     }
@@ -319,10 +422,16 @@ impl ChromiumSession {
         }
     }
 
-    fn on_event(&mut self, method: &str, params: &Value) -> Result<bool, BrowserError> {
+    fn on_event(
+        &mut self,
+        method: &str,
+        params: &Value,
+        pipe: Pipe,
+        session_id: Option<&str>,
+    ) -> Result<bool, BrowserError> {
         match method {
             "Fetch.requestPaused" => {
-                self.on_paused(params.clone())?;
+                self.on_paused(params.clone(), pipe, session_id.map(str::to_string))?;
                 Ok(false)
             }
             "Page.loadEventFired" => Ok(true),
@@ -333,13 +442,147 @@ impl ChromiumSession {
         }
     }
 
-    fn on_paused(&mut self, params: Value) -> Result<(), BrowserError> {
+    fn poll_next(&mut self) -> Result<Option<(Pipe, Incoming)>, BrowserError> {
+        if let Some(message) = self.cdp.poll()? {
+            return Ok(Some((Pipe::Content, message)));
+        }
+        if let Some(browser) = self.browser_cdp.as_mut() {
+            if let Some(message) = browser.poll()? {
+                return Ok(Some((Pipe::Browser, message)));
+            }
+        }
+        Ok(None)
+    }
+
+    fn fetch_call(&mut self, method: &str, params: Value) -> Result<Value, BrowserError> {
+        let session = self.fetch_session.clone();
+        match self.fetch_pipe {
+            Pipe::Content => self.cdp.call_in(method, params, session.as_deref()),
+            Pipe::Browser => {
+                let browser = self.browser_cdp.as_mut().ok_or_else(|| {
+                    BrowserError::Cdp("browser devtools is not connected".to_string())
+                })?;
+                browser.call_in(method, params, session.as_deref())
+            }
+        }
+    }
+
+    fn drain_chrome_commands(&mut self) -> Result<(), BrowserError> {
+        let Some(zen) = &self.zen else {
+            return Ok(());
+        };
+        let commands = zen.pop_commands();
+        for command in commands {
+            self.apply_chrome_command(command)?;
+        }
+        Ok(())
+    }
+
+    fn apply_chrome_command(&mut self, command: ChromeCommand) -> Result<(), BrowserError> {
+        match command {
+            ChromeCommand::NewTab => self.open_tab("about:blank"),
+            ChromeCommand::Activate { tab_id } => {
+                let target = self.zen.as_ref().and_then(|zen| zen.tab_target(&tab_id));
+                if let Some(target) = target {
+                    if let Some(browser) = self.browser_cdp.as_mut() {
+                        browser.call("Target.activateTarget", json!({"targetId": target}))?;
+                    }
+                    if let Some(zen) = &self.zen {
+                        zen.set_active_tab(&tab_id);
+                    }
+                }
+                Ok(())
+            }
+            ChromeCommand::Close { tab_id } => {
+                let target = self.zen.as_ref().and_then(|zen| zen.tab_target(&tab_id));
+                if let Some(target) = target {
+                    if let Some(browser) = self.browser_cdp.as_mut() {
+                        let _ = browser.call("Target.closeTarget", json!({"targetId": target}));
+                    }
+                }
+                if let Some(zen) = &self.zen {
+                    if let Some(next) = zen.close_tab(&tab_id) {
+                        if let Some(browser) = self.browser_cdp.as_mut() {
+                            let _ =
+                                browser.call("Target.activateTarget", json!({"targetId": next}));
+                        }
+                    }
+                }
+                Ok(())
+            }
+            ChromeCommand::Navigate { url } => {
+                let url = normalize_location(&url);
+                self.cdp.send("Page.navigate", json!({"url": url}), None)?;
+                if let Some(zen) = &self.zen {
+                    zen.set_active_url(url);
+                }
+                Ok(())
+            }
+            ChromeCommand::NewSpace { .. }
+            | ChromeCommand::ActivateSpace { .. }
+            | ChromeCommand::RenameSpace { .. }
+            | ChromeCommand::ToggleCompact
+            | ChromeCommand::ToggleSide
+            | ChromeCommand::Pin { .. } => Ok(()),
+        }
+    }
+
+    fn open_tab(&mut self, url: &str) -> Result<(), BrowserError> {
+        let Some(browser) = self.browser_cdp.as_mut() else {
+            return Ok(());
+        };
+        let created = browser.call(
+            "Target.createTarget",
+            json!({"url": url, "background": true}),
+        )?;
+        let target_id = created["targetId"].as_str().unwrap_or("").to_string();
+        if target_id.is_empty() {
+            return Err(BrowserError::Cdp("Chromium did not open a tab".to_string()));
+        }
+        let attached = browser.call(
+            "Target.attachToTarget",
+            json!({"targetId": target_id, "flatten": true}),
+        )?;
+        let session_id = attached["sessionId"].as_str().unwrap_or("").to_string();
+        if !session_id.is_empty() {
+            browser.call_in(
+                "Fetch.enable",
+                json!({
+                    "patterns": [
+                        {"requestStage": "Request"},
+                        {"requestStage": "Response", "resourceType": "Document"}
+                    ]
+                }),
+                Some(&session_id),
+            )?;
+            browser.call_in("Page.enable", json!({}), Some(&session_id))?;
+            if let Ok(tree) = browser.call_in("Page.getFrameTree", json!({}), Some(&session_id)) {
+                if let Some(frame_id) = tree["frameTree"]["frame"]["id"].as_str() {
+                    self.extra_main_frames.insert(frame_id.to_string());
+                }
+            }
+        }
+        if let Some(zen) = &self.zen {
+            zen.add_tab(target_id, url.to_string());
+        }
+        Ok(())
+    }
+
+    fn on_paused(
+        &mut self,
+        params: Value,
+        pipe: Pipe,
+        session: Option<String>,
+    ) -> Result<(), BrowserError> {
+        self.fetch_pipe = pipe;
+        self.fetch_session = session;
         let request_id = json_string(&params, "requestId");
         let url = json_string(&params["request"], "url");
         let method = json_string(&params["request"], "method");
         let devtools_type = json_string(&params, "resourceType");
         let frame_id = json_string(&params, "frameId");
-        let is_main_frame = frame_id == self.main_frame_id;
+        let is_main_frame =
+            frame_id == self.main_frame_id || self.extra_main_frames.contains(&frame_id);
         let response_stage = params.get("responseStatusCode").is_some();
         if response_stage {
             return self.on_document_response(params, &request_id, &url, &method, is_main_frame);
@@ -387,7 +630,7 @@ impl ChromiumSession {
             CefBeforeLoad::Continue { url_override } => {
                 if let Some(rewritten) = url_override.filter(|rewritten| rewritten != url) {
                     self.record(url, devtools_type, "rewrite");
-                    self.cdp.call(
+                    self.fetch_call(
                         "Fetch.fulfillRequest",
                         json!({
                             "requestId": request_id,
@@ -406,14 +649,14 @@ impl ChromiumSession {
             }
             CefBeforeLoad::Cancel => {
                 self.record(url, devtools_type, "cancel");
-                self.cdp.call(
+                self.fetch_call(
                     "Fetch.failRequest",
                     json!({"requestId": request_id, "errorReason": "BlockedByClient"}),
                 )?;
             }
             CefBeforeLoad::Replace { mime, body } => {
                 self.record(url, devtools_type, "stub");
-                self.cdp.call(
+                self.fetch_call(
                     "Fetch.fulfillRequest",
                     json!({
                         "requestId": request_id,
@@ -430,7 +673,7 @@ impl ChromiumSession {
             CefBeforeLoad::BlockNavigation => {
                 self.record(url, devtools_type, "block_navigation");
                 let page = interstitial(url);
-                self.cdp.call(
+                self.fetch_call(
                     "Fetch.fulfillRequest",
                     json!({
                         "requestId": request_id,
@@ -487,7 +730,7 @@ impl ChromiumSession {
         }
         if !rewrite_html {
             self.record(url, "document", "csp");
-            self.cdp.call(
+            self.fetch_call(
                 "Fetch.continueResponse",
                 json!({
                     "requestId": request_id,
@@ -505,7 +748,7 @@ impl ChromiumSession {
             Err(error) => {
                 trace(format!("response body unavailable for {url}: {error}"));
                 self.record(url, "document", "csp");
-                self.cdp.call(
+                self.fetch_call(
                     "Fetch.continueResponse",
                     json!({
                         "requestId": request_id,
@@ -536,7 +779,7 @@ impl ChromiumSession {
             ));
         }
         self.record(url, "document", "rewrite_document");
-        self.cdp.call(
+        self.fetch_call(
             "Fetch.fulfillRequest",
             json!({
                 "requestId": request_id,
@@ -608,7 +851,32 @@ fn wait_for_port(user_data: &Path, stderr_path: &Path) -> Result<u16, BrowserErr
     }
 }
 
-fn page_websocket(port: u16, stderr_path: &Path) -> Result<String, BrowserError> {
+fn browser_websocket(port: u16, stderr_path: &Path) -> Result<String, BrowserError> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(5))
+        .build();
+    let url = format!("http://127.0.0.1:{port}/json/version");
+    let response = agent.get(&url).call().map_err(|error| {
+        BrowserError::Launch(format!(
+            "Chromium did not publish a browser DevTools endpoint: {error}. {}",
+            stderr_tail(stderr_path)
+        ))
+    })?;
+    let text = response.into_string().unwrap_or_default();
+    let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    value["webSocketDebuggerUrl"]
+        .as_str()
+        .map(str::to_string)
+        .filter(|socket| !socket.is_empty())
+        .ok_or_else(|| {
+            BrowserError::Launch(format!(
+                "Chromium browser DevTools socket was missing. {}",
+                stderr_tail(stderr_path)
+            ))
+        })
+}
+
+fn page_websocket(port: u16, stderr_path: &Path) -> Result<(String, String), BrowserError> {
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(5))
         .build();
@@ -618,14 +886,17 @@ fn page_websocket(port: u16, stderr_path: &Path) -> Result<String, BrowserError>
         if let Ok(response) = agent.get(&url).call() {
             if let Ok(text) = response.into_string() {
                 if let Ok(targets) = serde_json::from_str::<Vec<Value>>(&text) {
-                    if let Some(socket) = targets.iter().find_map(|target| {
+                    if let Some(found) = targets.iter().find_map(|target| {
                         if target["type"].as_str() == Some("page") {
-                            target["webSocketDebuggerUrl"].as_str().map(str::to_string)
+                            Some((
+                                target["webSocketDebuggerUrl"].as_str()?.to_string(),
+                                target["id"].as_str()?.to_string(),
+                            ))
                         } else {
                             None
                         }
                     }) {
-                        return Ok(socket);
+                        return Ok(found);
                     }
                 }
             }

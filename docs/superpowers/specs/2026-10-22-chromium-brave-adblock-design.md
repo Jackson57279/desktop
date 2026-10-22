@@ -121,7 +121,7 @@ The CLI prints JSON. `decide` reports `allow`, `cancel`, `stub`, or `block_navig
 - Specific cosmetic CSS and `injected_script` are inserted immediately after `<head>` before the document is parsed, so scriptlets run in the page ahead of its own scripts.
 - After `load`, class and id tokens are collected and generic cosmetic rules are inserted. Procedural actions are still returned to the caller and are not interpreted.
 
-`zen-chromium browse URL` performs that navigation. It is headless unless `--headed` is set. `DevTools` `Fetch` and `XHR` both map to adblock `xhr`.
+`zen-chromium browse URL` opens that Chromium window beside Zen's sidebar. The sidebar has spaces, pinned and normal vertical tabs, an address box, new tab, compact mode, and a control to move the sidebar. It is headless unless `--headed` is set. `DevTools` `Fetch` and `XHR` both map to adblock `xhr`.
 
 The Firefox chrome is still the UI for `npm run build`. This session is the Chromium port's browser: web content runs in Chromium, and every network decision goes through Brave's engine.
 
