@@ -37,6 +37,17 @@ Zen is a firefox-based browser with the aim of pushing your productivity to a ne
 - [`Release`](https://zen-browser.app/download) - Is currently built using Firefox version `158.0`!
 - [`Twilight`](https://zen-browser.app/download?twilight) - Is currently built using Firefox version `RC 158.0`!
 
+### Chromium host
+
+Zen's window and browser chrome stay on the Firefox tree in `src/`. The Chromium port is `chromium/`: a request host that uses Brave Browser's `adblock` engine (crate `adblock` 0.13.3) for network blocks, redirect bodies, `$removeparam`, CSP, and cosmetic filters. It does not replace `npm run build`.
+
+```bash
+cargo test --manifest-path chromium/Cargo.toml --all-targets
+cargo build --release --manifest-path chromium/Cargo.toml
+```
+
+Filter list locations come from `--list` or `ZEN_CHROMIUM_FILTER_LISTS`. See `chromium/.env.example`. `zen-chromium browse URL` opens that URL in the Chromium engine with Zen's sidebar: spaces, vertical tabs, and ad blocking. Google Chrome is not used.
+
 ### Contributing
 
 If you'd like to report a bug, please do so on our [GitHub Issues page](https://github.com/zen-browser/desktop/issues/) and for feature requests, you can use [GitHub Discussions](https://github.com/zen-browser/desktop/discussions).
